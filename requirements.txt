@@ -1,0 +1,13 @@
+ultralytics
+easyocr
+pytesseract
+opencv-python
+torch
+torchvision
+pandas
+numpy
+matplotlib
+seaborn
+tqdm
+pathlib
+scipy
