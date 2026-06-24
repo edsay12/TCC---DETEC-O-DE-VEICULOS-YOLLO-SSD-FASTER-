@@ -73,8 +73,6 @@ def classify_scenario(metrics):
 
 def sync_label(original_img_path, target_folder, new_filename):
     """Busca o arquivo .txt (YOLO) correspondente e o copia para a nova pasta."""
-    # Tenta encontrar a pasta de labels baseada na estrutura padrão (images -> labels)
-    # Ex: .../images/train/file.jpg -> .../labels/train/file.txt
     label_path = Path(str(original_img_path).replace("images", "labels")).with_suffix(".txt")
     
     if label_path.exists():
