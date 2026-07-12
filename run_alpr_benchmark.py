@@ -1,12 +1,3 @@
-"""
-Benchmark ALPR usando o dataset UFPR-ALPR com ground truth real.
-
-Uso:
-    python run_alpr_benchmark.py
-    python run_alpr_benchmark.py --limit 20       # Teste rápido com 20 imagens
-    python run_alpr_benchmark.py --split testing  # Split oficial para o TCC
-"""
-
 import cv2
 import argparse
 import pandas as pd
@@ -18,34 +9,126 @@ from tqdm import tqdm
 from src.models.detectors import YOLODetector, TorchvisionDetector, PlateDetector
 from src.ocr.ocr_engine import OCREngine
 from src.utils.ufpr_parser import load_dataset_split
-from src.utils.evaluator import evaluate_detection
+from src.utils.evaluator import evaluate_detection, compute_iou
 
-# Detecta o diretório base dinamicamente
-BASE_DIR      = Path(__file__).parent if "__file__" in locals() else Path.cwd()
-DATASET_ROOT  = BASE_DIR / "UFPR-ALPR dataset"
-OUTPUT_DIR    = BASE_DIR / "dataset_processado" / "resultados"
+BASE_DIR = Path(__file__).parent if "__file__" in locals() else Path.cwd()
+DATASET_ROOT = BASE_DIR / "UFPR-ALPR dataset"
+OUTPUT_DIR = BASE_DIR / "dataset_processado" / "resultados"
 
 
-def run_benchmark(split: str = 'testing', limit: int = None):
+# =========================================================
+# Utilitários
+# =========================================================
+VALID_VEHICLE_CLASSES = {'car', 'truck', 'bus', 'motorcycle'}
+
+
+def clip_box(box, w, h):
+    x1, y1, x2, y2 = map(int, box)
+    x1 = max(0, min(x1, w - 1))
+    y1 = max(0, min(y1, h - 1))
+    x2 = max(0, min(x2, w))
+    y2 = max(0, min(y2, h))
+    return [x1, y1, x2, y2]
+
+
+def expand_box(box, w, h, margin=0.10):
+    x1, y1, x2, y2 = box
+    bw = x2 - x1
+    bh = y2 - y1
+    dx = int(bw * margin)
+    dy = int(bh * margin)
+    return clip_box([x1 - dx, y1 - dy, x2 + dx, y2 + dy], w, h)
+
+
+def crop_image(img, box):
+    x1, y1, x2, y2 = map(int, box)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    crop = img[y1:y2, x1:x2]
+    if crop is None or crop.size == 0:
+        return None
+    return crop
+
+
+def shift_box_to_crop(box, crop_origin):
+    """
+    Converte bbox do sistema global da imagem para o sistema local do recorte.
+    crop_origin = (x1_crop, y1_crop)
+    """
+    x1, y1, x2, y2 = box
+    ox, oy = crop_origin
+    return [x1 - ox, y1 - oy, x2 - ox, y2 - oy]
+
+
+def choose_best_vehicle(vehicles, gt_vehicle_box):
+    """
+    Escolhe o veículo detectado com maior IoU com o GT do veículo.
+    """
+    if not vehicles:
+        return None, 0.0
+
+    best_det = None
+    best_iou = -1.0
+
+    for det in vehicles:
+        det_box = det['bbox']
+        iou = compute_iou(det_box, gt_vehicle_box)
+        if iou > best_iou:
+            best_iou = iou
+            best_det = det
+
+    return best_det, best_iou
+
+
+def majority_vote(series):
+    non_empty = series.dropna()
+    non_empty = non_empty[non_empty != '']
+    if non_empty.empty:
+        return ''
+    return non_empty.mode().iloc[0]
+
+
+# =========================================================
+# Benchmark principal
+# =========================================================
+def run_benchmark(
+    split='testing',
+    limit=None,
+    mode='end_to_end',           # 'end_to_end' ou 'ocr_oracle'
+    vehicle_margin=0.10,
+    save_csv=True
+):
+    """
+    mode='end_to_end':
+        - usa detector de veículo
+        - usa detector de placa
+        - se a placa não for detectada => falha real (sem GT fallback da placa)
+
+    mode='ocr_oracle':
+        - usa GT da placa para recorte da placa
+        - serve para medir o OCR isoladamente
+    """
+    assert mode in {'end_to_end', 'ocr_oracle'}
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    print("=" * 60)
-    print("  BENCHMARK ALPR — UFPR-ALPR Dataset (Ground Truth Real)")
-    print("=" * 60)
+    print("=" * 70)
+    print(f"  BENCHMARK ALPR — UFPR-ALPR ({mode})")
+    print("=" * 70)
 
-    # --- Carrega amostras do split ---
     print(f"\nCarregando split '{split}'...")
     samples = load_dataset_split(DATASET_ROOT, split=split, limit=limit)
     print(f"  Total de amostras carregadas: {len(samples)}")
 
-    # --- Detectores de veículo ---
+    # -------------------------
+    # Detectores de veículo
+    # -------------------------
     models_config = [
         ('YOLOv8',       lambda: YOLODetector('yolov8n.pt')),
         ('SSD',          lambda: TorchvisionDetector(model_type='ssd')),
         ('Faster R-CNN', lambda: TorchvisionDetector(model_type='faster_rcnn')),
     ]
 
-    # Tenta inicializar cada modelo, pula se falhar
     vehicle_detectors = []
     for name, factory in models_config:
         try:
@@ -54,29 +137,33 @@ def run_benchmark(split: str = 'testing', limit: int = None):
             vehicle_detectors.append((name, det))
             print("OK")
         except Exception as e:
-            print(f"FALHOU ({type(e).__name__}). Pulando.")
+            print(f"FALHOU ({type(e).__name__}): {e}")
 
     if not vehicle_detectors:
-        print("Nenhum detector carregou com sucesso. Abortando.")
+        print("Nenhum detector carregou com sucesso.")
         return None
 
-    # --- Detector de placa (único, compartilhado) ---
+    # Detector de placa
     plate_detector = PlateDetector()
 
-    # --- OCR ---
+    # OCR
     ocr = OCREngine(engine_type='easyocr')
 
     all_results = []
 
+    # ======================================================
+    # Loop por modelo
+    # ======================================================
     for det_name, vehicle_det in vehicle_detectors:
         print(f"\n>>> Testando: {det_name}")
 
         for sample in tqdm(samples, desc=det_name):
-            img_path   = sample['image_path']
-            annotation = sample['annotation']
-            gt_text    = annotation['plate_text']
-            gt_bbox    = annotation['plate_bbox']       # ground truth da placa
-            gt_veh     = annotation['vehicle_bbox']     # ground truth do veículo
+            img_path = sample['image_path']
+            ann = sample['annotation']
+
+            gt_text = ann['plate_text']
+            gt_plate = ann['plate_bbox']       # bbox da placa na imagem inteira
+            gt_vehicle = ann['vehicle_bbox']   # bbox do veículo na imagem inteira
 
             img = cv2.imread(str(img_path))
             if img is None:
@@ -84,177 +171,213 @@ def run_benchmark(split: str = 'testing', limit: int = None):
 
             h_img, w_img = img.shape[:2]
 
-            # --- Estágio 1: Usa o detector real para encontrar o veículo ---
-            vehicle_detections = vehicle_det.detect(img)
-            vehicles = [d for d in vehicle_detections
-                        if d['class'] in ['car', 'truck', 'bus', 'motorcycle']]
+            # -------------------------
+            # ETAPA 1: detectar veículo
+            # -------------------------
+            detections = vehicle_det.detect(img)
+            vehicles = [
+                d for d in detections
+                if str(d.get('class', '')).lower() in VALID_VEHICLE_CLASSES
+            ]
 
-            if vehicles:
-                # Pega o maior veículo detectado
-                v = max(vehicles, key=lambda d: (d['bbox'][2]-d['bbox'][0]) * (d['bbox'][3]-d['bbox'][1]))
-                x1, y1, x2, y2 = map(int, v['bbox'])
-                # Clipa para dentro da imagem
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(w_img, x2), min(h_img, y2)
-                vehicle_crop = img[y1:y2, x1:x2]
-                # Ajusta gt_bbox para o sistema de coordenadas do recorte
-                gt_bbox_crop = [
-                    gt_bbox[0] - x1, gt_bbox[1] - y1,
-                    gt_bbox[2] - x1, gt_bbox[3] - y1,
-                ]
+            best_vehicle, vehicle_iou = choose_best_vehicle(vehicles, gt_vehicle)
+
+            if best_vehicle is not None:
+                vehicle_box = clip_box(best_vehicle['bbox'], w_img, h_img)
+                vehicle_found = True
+                vehicle_box_source = 'detected'
             else:
-                # Fallback: usa veículo do ground truth se o detector falhar
-                x1, y1 = max(0, gt_veh[0]), max(0, gt_veh[1])
-                x2, y2 = min(w_img, gt_veh[2]), min(h_img, gt_veh[3])
-                vehicle_crop = img[y1:y2, x1:x2]
-                gt_bbox_crop = [
-                    gt_bbox[0] - x1, gt_bbox[1] - y1,
-                    gt_bbox[2] - x1, gt_bbox[3] - y1,
-                ]
+                # fallback apenas para não perder o frame no pipeline,
+                # mas isso fica registrado no CSV
+                vehicle_box = clip_box(gt_vehicle, w_img, h_img)
+                vehicle_found = False
+                vehicle_box_source = 'gt_fallback'
 
-            if vehicle_crop.size == 0:
+            # expande o recorte do veículo
+            vehicle_box = expand_box(vehicle_box, w_img, h_img, margin=vehicle_margin)
+            vx1, vy1, vx2, vy2 = vehicle_box
+
+            vehicle_crop = crop_image(img, vehicle_box)
+            if vehicle_crop is None:
                 continue
 
-            # --- Estágio 2: Detecta a placa dentro do recorte ---
-            plate_detections = plate_detector.detect(vehicle_crop)
+            # GT da placa no sistema do crop do veículo
+            gt_plate_crop = shift_box_to_crop(gt_plate, (vx1, vy1))
 
-            if plate_detections:
-                best_plate = max(plate_detections, key=lambda p: p['conf'])
-                pred_bbox  = best_plate['bbox']
-                px1, py1, px2, py2 = map(int, pred_bbox)
-                px1, py1 = max(0, px1), max(0, py1)
-                plate_crop = vehicle_crop[py1:py2, px1:px2]
+            # -------------------------
+            # ETAPA 2: detectar placa
+            # -------------------------
+            pred_bbox = None
+            plate_crop = None
+            plate_found = False
+            plate_bbox_source = 'none'
+
+            if mode == 'ocr_oracle':
+                # usa a placa GT diretamente
+                plate_bbox_source = 'gt_oracle'
+                plate_found = True
+                pred_bbox = gt_plate_crop[:]  # para IoU = 1 no modo oracle
+                plate_crop = crop_image(vehicle_crop, gt_plate_crop)
+
             else:
-                # Fallback: usa bbox GT da placa para isolar contribuição do OCR
-                pred_bbox  = None
-                gx1, gy1, gx2, gy2 = [max(0, int(c)) for c in gt_bbox_crop]
-                plate_crop = vehicle_crop[gy1:gy2, gx1:gx2]
+                # mode = end_to_end
+                plate_detections = plate_detector.detect(vehicle_crop)
 
-            # --- Estágio 3: OCR ---
+                if plate_detections:
+                    best_plate = max(plate_detections, key=lambda p: p.get('conf', 0.0))
+                    pred_bbox = best_plate['bbox']
+                    plate_bbox_source = 'detected'
+                    plate_found = True
+                    plate_crop = crop_image(vehicle_crop, pred_bbox)
+                else:
+                    # SEM fallback GT no benchmark real
+                    pred_bbox = None
+                    plate_crop = None
+                    plate_found = False
+                    plate_bbox_source = 'none'
+
+            # -------------------------
+            # ETAPA 3: OCR
+            # -------------------------
             pred_text = ''
+            ocr_executed = False
+
             if plate_crop is not None and plate_crop.size > 0:
+                ocr_executed = True
                 pred_text = ocr.read_plate(plate_crop) or ''
 
-            # --- Avaliação ---
-            metrics = evaluate_detection(pred_bbox, gt_bbox_crop, pred_text, gt_text)
+            # -------------------------
+            # AVALIAÇÃO
+            # -------------------------
+            metrics = evaluate_detection(
+                pred_bbox,
+                gt_plate_crop,
+                pred_text,
+                gt_text
+            )
 
             all_results.append({
-                'model':         det_name,
-                'track':         img_path.parent.name,   # ex: track0091
-                'image':         img_path.name,
-                'gt_plate':      gt_text,
-                'pred_plate':    pred_text,
-                'vehicle_found': len(vehicles) > 0,
-                'iou':           round(metrics['iou'], 4),
-                'cer':           round(metrics['cer'], 4),
-                'exact_match':   metrics['exact_match'],
-                'plate_found':   metrics['plate_found'],
+                'mode': mode,
+                'model': det_name,
+                'track': img_path.parent.name,
+                'image': img_path.name,
+
+                'gt_plate': gt_text,
+                'pred_plate': pred_text,
+
+                'vehicle_found': vehicle_found,
+                'vehicle_iou': round(vehicle_iou, 4) if vehicle_iou is not None else 0.0,
+                'vehicle_bbox_source': vehicle_box_source,
+
+                'plate_found': plate_found,
+                'plate_bbox_source': plate_bbox_source,
+
+                'ocr_executed': ocr_executed,
+
+                'iou': round(metrics['iou'], 4),
+                'cer': round(metrics['cer'], 4),
+                'exact_match': metrics['exact_match'],
             })
 
-    # --- Salva CSV ---
     df = pd.DataFrame(all_results)
-    csv_path = OUTPUT_DIR / 'alpr_benchmark.csv'
-    df.to_csv(csv_path, index=False)
-    print(f"\nResultados salvos em: {csv_path}")
 
-    # --- Gera Relatório ---
-    _generate_report(df)
+    if save_csv:
+        csv_name = f'alpr_benchmark_{mode}.csv'
+        csv_path = OUTPUT_DIR / csv_name
+        df.to_csv(csv_path, index=False)
+        print(f"\nResultados salvos em: {csv_path}")
 
+    _generate_report(df, mode=mode)
     return df
 
 
-def _generate_report(df: pd.DataFrame):
-    print("\n" + "=" * 60)
-    print("  RELATÓRIO FINAL — BENCHMARK UFPR-ALPR")
-    print("=" * 60)
+# =========================================================
+# Relatório
+# =========================================================
+def _generate_report(df: pd.DataFrame, mode='end_to_end'):
+    print("\n" + "=" * 70)
+    print(f"  RELATÓRIO FINAL — UFPR-ALPR ({mode})")
+    print("=" * 70)
 
-    # --- Métricas por frame ---
     summary = df.groupby('model').agg(
         Total_Frames=('image', 'count'),
+        Vehicle_Detected=('vehicle_found', 'mean'),
+        Plate_Found=('plate_found', 'mean'),
+        OCR_Executado=('ocr_executed', 'mean'),
         IoU_Medio=('iou', 'mean'),
         CER_Medio=('cer', 'mean'),
         Acerto_Frame=('exact_match', 'mean'),
-        Taxa_Placa_Encontrada=('plate_found', 'mean'),
     ).round(4)
 
-    # --- Métricas por track (votação por maioria) ---
-    # Cada track = 1 veículo com a mesma placa em todos os frames.
-    # A leitura OCR mais frequente no track é a "resposta" do sistema.
-    def track_accuracy(group):
-        """Para cada track, elege a leitura mais votada e compara com GT."""
-        def best_vote(g):
-            non_empty = g['pred_plate'].dropna()
-            non_empty = non_empty[non_empty != '']
-            if non_empty.empty:
-                voted = ''
-            else:
-                voted = non_empty.mode().iloc[0]  # leitura mais frequente
-            gt = g['gt_plate'].iloc[0]
-            from src.utils.evaluator import is_exact_match
-            return is_exact_match(voted, gt)
+    # acerto por track via votação
+    track_acc = (
+        df.groupby(['model', 'track'])
+          .apply(lambda g: majority_vote(g['pred_plate']) == g['gt_plate'].iloc[0])
+          .groupby(level=0)
+          .mean()
+          .rename('Acerto_Track_Voto')
+    )
 
-        return group.groupby('track').apply(best_vote).mean()
-
-    track_acc = df.groupby('model').apply(track_accuracy).rename('Acerto_Track_Voto')
     summary = summary.join(track_acc)
 
-    summary['Acerto_Frame']           = (summary['Acerto_Frame'] * 100).round(1).astype(str) + '%'
-    summary['Taxa_Placa_Encontrada']  = (summary['Taxa_Placa_Encontrada'] * 100).round(1).astype(str) + '%'
-    summary['Acerto_Track_Voto']      = (summary['Acerto_Track_Voto'] * 100).round(1).astype(str) + '%'
+    # formatação %
+    for col in ['Vehicle_Detected', 'Plate_Found', 'OCR_Executado', 'Acerto_Frame', 'Acerto_Track_Voto']:
+        summary[col] = (summary[col] * 100).round(1).astype(str) + '%'
 
     print(summary.to_string())
     print()
-    print("Nota: 'Acerto_Track_Voto' usa votacao por maioria entre os frames do mesmo track.")
-    print("      Cada track corresponde a um veiculo especifico do dataset UFPR-ALPR.")
 
-    # --- Gráficos ---
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle('Benchmark ALPR — UFPR-ALPR Dataset', fontsize=14, fontweight='bold')
+    # gráficos
+    fig, axes = plt.subplots(1, 4, figsize=(22, 5))
+    fig.suptitle(f'Benchmark ALPR — UFPR-ALPR ({mode})', fontsize=14, fontweight='bold')
 
-    plot_df = df.groupby('model')[['iou', 'cer']].mean().reset_index()
+    plot_df = df.groupby('model').agg({
+        'iou': 'mean',
+        'cer': 'mean',
+        'plate_found': 'mean',
+        'exact_match': 'mean'
+    }).reset_index()
 
-    sns.barplot(data=plot_df, x='model', y='iou', hue='model', ax=axes[0], palette='viridis', legend=False)
-    axes[0].set_title('IoU Médio (maior = melhor)')
+    sns.barplot(data=plot_df, x='model', y='iou', hue='model', ax=axes[0], legend=False)
+    axes[0].set_title('IoU médio')
     axes[0].set_ylim(0, 1)
-    axes[0].set_ylabel('IoU')
 
-    sns.barplot(data=plot_df, x='model', y='cer', hue='model', ax=axes[1], palette='magma', legend=False)
-    axes[1].set_title('CER Médio (menor = melhor)')
+    sns.barplot(data=plot_df, x='model', y='cer', hue='model', ax=axes[1], legend=False)
+    axes[1].set_title('CER médio')
     axes[1].set_ylim(0, 1)
-    axes[1].set_ylabel('CER (Character Error Rate)')
 
-    # Usa acerto por track (votação) no gráfico — métrica mais justa
-    track_vote_df = df.groupby('model').apply(
-        lambda g: g.groupby('track').apply(
-            lambda t: (
-                lambda voted, gt: voted == gt
-            )(
-                (t['pred_plate'][t['pred_plate'] != ''].mode().iloc[0]
-                 if not t['pred_plate'][t['pred_plate'] != ''].empty else ''),
-                t['gt_plate'].iloc[0]
-            )
-        ).mean()
-    ).reset_index()
-    track_vote_df.columns = ['model', 'acerto_track']
-
-    sns.barplot(data=track_vote_df, x='model', y='acerto_track', hue='model', ax=axes[2], palette='rocket', legend=False)
-    axes[2].set_title('Acerto por Track — Votação (maior = melhor)')
+    sns.barplot(data=plot_df, x='model', y='plate_found', hue='model', ax=axes[2], legend=False)
+    axes[2].set_title('Taxa de placa encontrada')
     axes[2].set_ylim(0, 1)
-    axes[2].set_ylabel('Proporção de Veículos Corretos')
+
+    sns.barplot(data=plot_df, x='model', y='exact_match', hue='model', ax=axes[3], legend=False)
+    axes[3].set_title('Acerto por frame')
+    axes[3].set_ylim(0, 1)
 
     plt.tight_layout()
-    chart_path = OUTPUT_DIR / 'alpr_comparativo.png'
+    chart_path = OUTPUT_DIR / f'alpr_comparativo_{mode}.png'
     plt.savefig(chart_path, dpi=150, bbox_inches='tight')
     plt.show()
+
     print(f"Gráficos salvos em: {chart_path}")
 
 
+# =========================================================
+# Execução
+# =========================================================
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Benchmark ALPR com UFPR-ALPR")
-    parser.add_argument('--split',  type=str, default='testing',
+    parser.add_argument('--split', type=str, default='testing',
                         choices=['testing', 'training', 'validation'])
-    parser.add_argument('--limit',  type=int, default=None,
-                        help='Limite de imagens por split (ex: 20 para teste rápido)')
+    parser.add_argument('--limit', type=int, default=None)
+    parser.add_argument('--mode', type=str, default='end_to_end',
+                        choices=['end_to_end', 'ocr_oracle'])
+    parser.add_argument('--vehicle_margin', type=float, default=0.10)
     args = parser.parse_args()
 
-    df = run_benchmark(split=args.split, limit=args.limit)
+    run_benchmark(
+        split=args.split,
+        limit=args.limit,
+        mode=args.mode,
+        vehicle_margin=args.vehicle_margin
+    )

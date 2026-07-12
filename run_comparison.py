@@ -62,8 +62,8 @@ def run_full_comparison(dataset_path, output_dir, limit=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="TCC Multi-Model Comparison")
-    parser.add_argument("--input", type=str, default="c:/Users/edvan/OneDrive/Documentos/TCC/dataset_processado")
-    parser.add_argument("--output", type=str, default="c:/Users/edvan/OneDrive/Documentos/TCC/dataset_processado")
+    parser.add_argument("--input", type=str, default="dataset_processado")
+    parser.add_argument("--output", type=str, default="dataset_processado")
     parser.add_argument("--limit", type=int, default=None, help="Limite de imagens por cenário para teste rápido")
     
     args = parser.parse_args()

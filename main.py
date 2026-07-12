@@ -31,8 +31,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="TCC Traffic Monitoring Experiment")
     parser.add_argument("--model", type=str, default="yolo", choices=["yolo", "ssd", "faster_rcnn"])
     parser.add_argument("--ocr", type=str, default="easyocr", choices=["easyocr", "tesseract"])
-    parser.add_argument("--input", type=str, default="c:/Users/edvan/OneDrive/Documentos/TCC/dataset_processado")
-    parser.add_argument("--output", type=str, default="c:/Users/edvan/OneDrive/Documentos/TCC/dataset_processado")
+    parser.add_argument("--input", type=str, default="dataset_processado")
+    parser.add_argument("--output", type=str, default="dataset_processado")
     
     args = parser.parse_args()
     

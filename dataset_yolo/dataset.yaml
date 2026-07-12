@@ -1,0 +1,6 @@
+names:
+  0: license_plate
+path: /home/nicman/Desktop/TCC1/dataset_yolo
+test: images/test
+train: images/train
+val: images/val

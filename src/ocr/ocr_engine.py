@@ -85,32 +85,63 @@ class OCREngine:
     # Pré-processamento da imagem da placa
     # ------------------------------------------------------------------
     def preprocess_plate(self, plate_crop: np.ndarray) -> np.ndarray:
-        """
-        Pipeline de pré-processamento otimizado para placas brasileiras.
 
-        1. Upscaling 3× (melhora resolução para o OCR)
-        2. Conversão para cinza
-        3. CLAHE (equalização adaptativa de histograma — melhora contraste)
-        4. Denoising leve (preserva bordas de caracteres)
-        5. Threshold de Otsu (binarização global — mais estável que o adaptativo
-           para placas com fundo uniforme)
-        """
-        h, w = plate_crop.shape[:2]
-        # 1. Upscaling
-        plate = cv2.resize(plate_crop, (w * 3, h * 3), interpolation=cv2.INTER_CUBIC)
+        if plate_crop is None or plate_crop.size == 0:
+            return plate_crop
 
-        # 2. Cinza
+        if self.engine_type == "easyocr":
+            # O EasyOCR utiliza redes neurais profundas (CRAFT + CRNN) e funciona melhor
+            # com imagens em escala de cinza/coloridas sem binarização agressiva (limiarização/morfologia),
+            # pois estas removem texturas e gradientes essenciais para os recursos convolucionais.
+            # Redimensionamos em 3x com interpolação cúbica para melhorar a resolução espacial.
+            return cv2.resize(
+                plate_crop,
+                None,
+                fx=3,
+                fy=3,
+                interpolation=cv2.INTER_CUBIC
+            )
+
+        # =====================================================
+        # Pré-processamento clássico (Recomendado para Tesseract)
+        # =====================================================
+        plate = cv2.resize(
+            plate_crop,
+            None,
+            fx=4,
+            fy=4,
+            interpolation=cv2.INTER_CUBIC
+        )
+
         gray = cv2.cvtColor(plate, cv2.COLOR_BGR2GRAY)
+        gray = cv2.bilateralFilter(gray, 9, 75, 75)
 
-        # 3. CLAHE — melhora contraste local sem destruir bordas finas
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+        clahe = cv2.createCLAHE(
+            clipLimit=3.0,
+            tileGridSize=(8, 8)
+        )
         gray = clahe.apply(gray)
 
-        # 4. Denoising leve
-        gray = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
+        binary = cv2.adaptiveThreshold(
+            gray,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31,
+            15
+        )
 
-        # 5. Threshold de Otsu
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        kernel = np.ones((2,2), np.uint8)
+        binary = cv2.morphologyEx(
+            binary,
+            cv2.MORPH_OPEN,
+            kernel
+        )
+        binary = cv2.morphologyEx(
+            binary,
+            cv2.MORPH_CLOSE,
+            kernel
+        )
 
         return binary
 
@@ -118,36 +149,44 @@ class OCREngine:
     # Leitura da placa
     # ------------------------------------------------------------------
     def read_plate(self, plate_crop: np.ndarray) -> str:
-        """
-        Lê o texto de uma imagem de placa recortada.
 
-        Etapas:
-          1. Pré-processamento da imagem
-          2. OCR (EasyOCR ou Tesseract)
-          3. Limpeza do texto bruto
-          4. Correção posicional letra/número (máscara de placa brasileira)
-        """
         if plate_crop is None or plate_crop.size == 0:
             return ""
 
         processed = self.preprocess_plate(plate_crop)
 
         raw = ""
-        if self.engine_type == 'easyocr':
-            results = self.reader.readtext(processed)
-            if results:
-                # Pega a leitura com maior confiança
-                raw = max(results, key=lambda x: x[2])[1]
-        else:
-            config = (
-                '--psm 7 '
-                '-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+
+        if self.engine_type == "easyocr":
+
+            results = self.reader.readtext(
+                processed,
+                allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+                paragraph=False,
+                detail=1,
+                width_ths=0.5,
+                height_ths=0.5,
+                decoder="beamsearch"
             )
-            raw = pytesseract.image_to_string(processed, config=config)
+
+            if results:
+                raw = max(results, key=lambda x: x[2])[1]
+
+        else:
+
+            config = (
+                "--psm 7 "
+                "--oem 3 "
+                "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+            )
+
+            raw = pytesseract.image_to_string(
+                processed,
+                config=config
+            )
 
         cleaned = self.clean_text(raw)
 
-        # Aplica correção posicional se o texto tiver comprimento de placa válido (7)
         if len(cleaned) == 7:
             cleaned = _apply_plate_mask(cleaned)
 
