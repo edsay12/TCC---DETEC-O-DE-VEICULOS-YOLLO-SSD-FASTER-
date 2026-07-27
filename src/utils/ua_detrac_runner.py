@@ -20,7 +20,7 @@ import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 
-from src.utils.metrics import evaluate_batch, match_detections
+from src.utils.metrics import match_detections
 
 
 # ─────────────────────────────────────────────────────────────────────────────

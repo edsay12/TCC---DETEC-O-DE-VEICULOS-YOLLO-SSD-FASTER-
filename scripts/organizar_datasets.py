@@ -6,26 +6,36 @@ from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 
-# --- CONFIGURAÇÕES GERAIS ---
-# Detecta automaticamente o caminho se estiver no Linux ou Windows
-BASE_DIR = Path(__file__).parent if "__file__" in locals() else Path.cwd()
-DATASET_PROCESSADO = BASE_DIR / "dataset_processado"
+## Caminho (raiz do projeto = um nível acima de scripts/)
+BASE_DIR = Path(__file__).resolve().parent.parent if "__file__" in locals() else Path.cwd()
+
+DATASET_PROCESSADO = BASE_DIR / "data" / "processado"
 
 SUBDIRS = ["diurno", "noturno", "baixa_qualidade", "ruido"]
+
 METADATA_FILE = DATASET_PROCESSADO / "processamento_metadata.csv"
 
 def setup_directories(base_path, subdirs):
-    """Garante que a estrutura de pastas e o CSV de metadados existam."""
     base_path.mkdir(parents=True, exist_ok=True)
     for subdir in subdirs:
         (base_path / subdir).mkdir(parents=True, exist_ok=True)
     
     if not METADATA_FILE.exists():
-        df = pd.DataFrame(columns=["timestamp", "original_file", "scenario", "brightness", "blur", "contrast", "noise", "has_label", "target_path"])
+        df = pd.DataFrame(columns=["timestamp", 
+        "original_file", 
+        "scenario", 
+        "brightness", 
+        "blur", 
+        "contrast", 
+        "noise", 
+        "has_label", 
+        "target_path"
+        ])
+
         df.to_csv(METADATA_FILE, index=False)
 
 def get_image_metrics(image):
-    """Calcula métricas detalhadas para análise estatística no TCC."""
+    """Calcula métricas detalhadas"""
     if image is None: return None
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
@@ -188,7 +198,7 @@ if __name__ == "__main__":
     setup_directories(DATASET_PROCESSADO, SUBDIRS)
     
     # Processar UA-DETRAC
-    ua_path = BASE_DIR / "UA-DETRAC" / "DETRAC_Upload" / "images"
+    ua_path = BASE_DIR / "data" / "UA-DETRAC" / "DETRAC_Upload" / "images"
     if ua_path.exists():
         run_pipeline(ua_path, DATASET_PROCESSADO)
     else:
