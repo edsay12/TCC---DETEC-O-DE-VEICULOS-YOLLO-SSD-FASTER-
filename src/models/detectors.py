@@ -1,6 +1,5 @@
 import torch
 import cv2
-import numpy as np
 from abc import ABC, abstractmethod
 from ultralytics import YOLO
 from torchvision.models.detection import fasterrcnn_resnet50_fpn, ssdlite320_mobilenet_v3_large
@@ -13,7 +12,7 @@ class BaseDetector(ABC):
         pass
 
 class YOLODetector(BaseDetector):
-    def __init__(self, model_path='yolov8n.pt'):
+    def __init__(self, model_path='models/yolov8n.pt'):
         self.model = YOLO(model_path)
         self.model_name = "YOLOv8"
         
@@ -64,7 +63,7 @@ class TorchvisionDetector(BaseDetector):
         return detections
 
 class PlateDetector(BaseDetector):
-    def __init__(self, model_path='yolov8n-plate.pt'):
+    def __init__(self, model_path='models/yolov8n-plate.pt'):
         try:
             # Tenta carregar o modelo YOLO especializado
             self.model = YOLO(model_path)

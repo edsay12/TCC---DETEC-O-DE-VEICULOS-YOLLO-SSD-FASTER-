@@ -1,3 +1,4 @@
+import sys
 import cv2
 import argparse
 import pandas as pd
@@ -6,14 +7,19 @@ import seaborn as sns
 from pathlib import Path
 from tqdm import tqdm
 
+# Garante que a raiz do projeto está no sys.path para imports de src/
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 from src.models.detectors import YOLODetector, TorchvisionDetector, PlateDetector
 from src.ocr.ocr_engine import OCREngine
 from src.utils.ufpr_parser import load_dataset_split
 from src.utils.evaluator import evaluate_detection, compute_iou
 
-BASE_DIR = Path(__file__).parent if "__file__" in locals() else Path.cwd()
-DATASET_ROOT = BASE_DIR / "UFPR-ALPR dataset"
-OUTPUT_DIR = BASE_DIR / "dataset_processado" / "resultados"
+BASE_DIR = Path(__file__).resolve().parent.parent if "__file__" in locals() else Path.cwd()
+DATASET_ROOT = BASE_DIR / "data" / "UFPR-ALPR"
+OUTPUT_DIR = BASE_DIR / "data" / "processado" / "resultados"
 
 
 # =========================================================
@@ -124,7 +130,7 @@ def run_benchmark(
     # Detectores de veículo
     # -------------------------
     models_config = [
-        ('YOLOv8',       lambda: YOLODetector('yolov8n.pt')),
+        ('YOLOv8',       lambda: YOLODetector(str(BASE_DIR / 'models' / 'yolov8n.pt'))),
         ('SSD',          lambda: TorchvisionDetector(model_type='ssd')),
         ('Faster R-CNN', lambda: TorchvisionDetector(model_type='faster_rcnn')),
     ]
@@ -144,7 +150,7 @@ def run_benchmark(
         return None
 
     # Detector de placa
-    plate_detector = PlateDetector()
+    plate_detector = PlateDetector(str(BASE_DIR / 'models' / 'yolov8n-plate.pt'))
 
     # OCR
     ocr = OCREngine(engine_type='easyocr')

@@ -1,7 +1,8 @@
-dataset_processado/
-detectors/
-UFPR-ALPR dataset/
-UA-DETRAC/
+data/
+models/
+runs/
+dataset_yolo/
+*.pt
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

@@ -9,5 +9,3 @@ numpy
 matplotlib
 seaborn
 tqdm
-pathlib
-scipy
