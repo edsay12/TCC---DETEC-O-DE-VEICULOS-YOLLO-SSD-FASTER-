@@ -150,7 +150,7 @@ def run_benchmark(
         return None
 
     # Detector de placa
-    plate_detector = PlateDetector()
+    plate_detector = PlateDetector(str(BASE_DIR / 'models' / 'yolov8n-plate.pt'))
 
     # OCR
     ocr = OCREngine(engine_type='easyocr')
